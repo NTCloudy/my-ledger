@@ -1,5 +1,5 @@
 // Offline support: app files are cached; network first so updates show up.
-const VERSION = "ledger-v4";
+const VERSION = "ledger-v5";
 const SHELL = ["./", "index.html", "css/app.css", "js/app.js", "js/store.js", "js/calc.js", "js/prices.js", "js/csv.js", "js/sync.js",
   "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png"];
 

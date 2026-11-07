@@ -79,8 +79,13 @@ const portable = s => { const { prices, ...rest } = s; return { ...rest, setting
 async function gh(cfg, path, opts = {}) {
   const r = await fetch(API + path, { ...opts, cache: "no-store", headers: {
     Authorization: "Bearer " + cfg.token, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", ...(opts.headers || {}) } });
-  if (r.status === 401) throw new Error("金鑰無效或過期");
-  if (r.status === 403 || r.status === 404 && path.endsWith("/" + cfg.repo)) throw new Error("金鑰沒有這個倉庫的權限");
+  if (r.status === 401) throw new Error("金鑰無效或過期（複製時可能少了字）");
+  if (r.status === 404 && path.endsWith("/" + cfg.repo)) throw new Error("金鑰沒有選到 my-ledger-data 倉庫（Repository access 要選它）");
+  if (r.status === 403) {
+    const body = await r.clone().json().catch(() => ({}));
+    if (/rate limit/i.test(body.message || "")) throw new Error("GitHub 暫時限流，等幾分鐘再試");
+    throw new Error(opts.method === "PUT" ? "金鑰只有讀取權限：Contents 要改成 Read and write" : "金鑰沒開 Contents 權限：Contents 要改成 Read and write");
+  }
   return r;
 }
 
