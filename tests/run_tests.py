@@ -60,9 +60,93 @@ async () => {
   eq('skipped', r.skipped, [4]);
   // setup link roundtrip
   eq('setup', S.decodeSetup(S.encodeSetup({ accounts: [{ name: '台銀' }] })), { accounts: [{ name: '台銀' }] });
+  // sync: encryption + merge
+  const Y = await import('/js/sync.js');
+  const f = await Y.encrypt({ a: 1, txt: '中文' }, 'pw123456');
+  eq('decrypt', await Y.decrypt(f, 'pw123456'), { a: 1, txt: '中文' });
+  let bad = ''; try { await Y.decrypt(f, 'nope'); } catch (e) { bad = e.message; }
+  eq('wrong pass', bad, '密碼不對');
+  const base = { v: 1, cats: { expense: ['A'], income: [] }, settings: { includeOwed: true }, snapshots: {}, metaU: 1 };
+  const L = { ...base, txs: [{ id: 'x', u: 5, date: '2026-11-01', amount: 1 }, { id: 'y', u: 1, date: '2026-11-02', amount: 2 }], accounts: [], del: {} };
+  const R = { ...base, txs: [{ id: 'x', u: 3, date: '2026-11-01', amount: 9 }, { id: 'z', u: 2, date: '2026-11-03', amount: 3 }], accounts: [], del: { y: 4 }, cats: { expense: ['B'], income: [] }, metaU: 2 };
+  const M = Y.merge(L, R);
+  eq('merge txs', M.txs.map(t => [t.id, t.amount]), [['z', 3], ['x', 1]]);
+  eq('merge cats newer', M.cats.expense, ['B']);
+  const D = Y.merge({ ...L, accounts: [{ id: 'a1', name: '台銀', u: 1 }] }, { ...R, accounts: [{ id: 'a2', name: '台銀', u: 9, amount: 5 }] });
+  eq('dedupe acct', D.accounts.map(a => a.id), ['a2']);
   return fails;
 }
 """
+
+
+def sync_e2e(browser):
+    """Two devices syncing through a fake GitHub contents API."""
+    import base64
+    import json as J
+    store = {"sha": None, "content": None, "n": 0}
+
+    def gh(route):
+        req = route.request
+        if req.url.endswith("/repos/NTCloudy/my-ledger-data"):
+            return route.fulfill(json={"private": True})
+        if req.method == "GET":
+            if not store["content"]:
+                return route.fulfill(status=404, json={})
+            return route.fulfill(json={"sha": store["sha"], "content": store["content"]})
+        body = J.loads(req.post_data)
+        if body.get("sha") != store["sha"]:
+            return route.fulfill(status=409, json={})
+        store["n"] += 1
+        store["sha"], store["content"] = f"s{store['n']}", body["content"]
+        return route.fulfill(json={"content": {"sha": store["sha"]}})
+
+    fails, pages = [], []
+    for _ in range(2):
+        ctx = browser.new_context(viewport={"width": 390, "height": 844})
+        ctx.route("https://api.github.com/**", gh)
+        ctx.route("https://open.er-api.com/**", lambda r: r.fulfill(json={"rates": {"USD": 1 / 32, "JPY": 5}}))
+        ctx.route("https://api.gold-api.com/**", lambda r: r.fulfill(json={"price": 4000}))
+        pg = ctx.new_page()
+        pg.goto(BASE + "#/settings")
+        pg.fill("#sytk", "github_pat_test")
+        pg.fill("#sypw", "secret123")
+        pg.click("#syon")
+        pg.wait_for_selector("#synow")
+        pages.append(pg)
+    a, b2 = pages
+    # device A adds a record -> auto upload
+    a.goto(BASE + "#/")
+    a.fill("#amt", "321")
+    a.click("[data-k=who] [data-v=both]")
+    a.click("#save")
+    a.wait_for_timeout(4000)
+    raw = base64.b64decode(store["content"] or "").decode()
+    if "321" in raw or "data" not in raw:
+        fails.append("cloud file is not encrypted")
+    # device B opens -> sees it; then adds its own
+    b2.goto(BASE + "#/settings")
+    b2.click("#synow")
+    b2.wait_for_timeout(1500)
+    b2.goto(BASE + "#/")
+    if "-321" not in b2.inner_text("#view"):
+        fails.append("device B did not receive A's record")
+    b2.fill("#amt", "55")
+    b2.click("#save")
+    b2.wait_for_timeout(4000)
+    # B deletes A's record
+    b2.click(".tx:has-text('-321')")
+    b2.on("dialog", lambda d: d.accept())
+    b2.click(".modal #del")
+    b2.wait_for_timeout(4000)
+    a.goto(BASE + "#/settings")
+    a.click("#synow")
+    a.wait_for_timeout(1500)
+    a.goto(BASE + "#/")
+    v = a.inner_text("#view")
+    if "-55" not in v or "-321" in v:
+        fails.append("device A merge wrong: " + v[-200:].replace("\n", " "))
+    a.screenshot(path=str(OUT / "sync.png"), full_page=True)
+    return fails
 
 
 def main():
@@ -97,7 +181,7 @@ def main():
         page.click("[data-k=cat] [data-v=薪資]")
         page.click("#save")
         txt = page.inner_text(".stats")
-        if "NT$600" not in txt or "NT$500" not in txt or "NT$50,000" not in txt:
+        if "600" not in txt or "500" not in txt or "50,000" not in txt or "NT$" in txt:
             fails.append("home stats wrong: " + txt.replace("\n", " "))
         page.screenshot(path=str(OUT / "home.png"), full_page=True)
 
@@ -105,11 +189,11 @@ def main():
         page.click(".tx:has-text('-300')")
         page.fill(".modal #amt", "400")
         page.click(".modal #ok")
-        if "NT$700" not in page.inner_text(".stats"):
+        if "700" not in page.inner_text(".stats"):
             fails.append("edit did not update owed")
 
         page.goto(BASE + "#/report")
-        page.wait_for_selector(".bar")
+        page.wait_for_selector(".donut")
         page.screenshot(path=str(OUT / "report.png"), full_page=True)
         page.goto(BASE + "#/list")
         page.click("[data-f=both]")
@@ -124,7 +208,7 @@ def main():
         page.goto(BASE + "#/setup?d=" + setup)
         page.wait_for_selector(".acct")
         page.wait_for_timeout(800)
-        st = page.inner_text(".stats")
+        st = page.inner_text(".hero")
         # 3200 + 10000 + 0050 close*10 + 97624 ; real = total - 5000 + 700
         price0050 = page.evaluate("fetch('/data/prices.json').then(r=>r.json()).then(d=>d.stocks['0050'].c)")
         total = 3200 + 10000 + price0050 * 10 + 97624
@@ -137,7 +221,7 @@ def main():
         page.click(".acct:has-text('台銀')")
         page.fill(".modal #aa", "20000")
         page.click(".modal #ok")
-        if f"NT${round(total + 10000):,}" not in page.inner_text(".stats"):
+        if f"NT${round(total + 10000):,}" not in page.inner_text(".hero"):
             fails.append("account edit")
 
         # CSV import
@@ -153,8 +237,14 @@ def main():
         if "寵物" not in page.inner_text("#view"):
             fails.append("new category from csv not added")
         page.screenshot(path=str(OUT / "settings.png"), full_page=True)
+        page.emulate_media(color_scheme="dark")
+        page.goto(BASE + "#/report")
+        page.wait_for_timeout(300)
+        page.screenshot(path=str(OUT / "report_dark.png"), full_page=True)
+        page.emulate_media(color_scheme="light")
         if errs:
             fails.append("page errors: " + "; ".join(errs))
+        fails += sync_e2e(b)
         b.close()
     for f in fails:
         print("FAIL", f)

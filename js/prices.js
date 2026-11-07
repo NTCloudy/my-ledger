@@ -26,6 +26,6 @@ export async function refresh(force = false) {
   ]);
   if (p.goldUsdOz && p.USD) p.goldPerGram = p.goldUsdOz * p.USD / 31.1034768;
   st.prices = p;
-  S.save();
+  S.save({ silent: true }); // prices are per-device, no need to sync
   return p;
 }
